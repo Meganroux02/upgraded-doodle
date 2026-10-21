@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deriv Tick Analyzer — Análisis Estadístico de Dígitos en Tiempo Real</title>
+
+  <!-- Tailwind CSS vía CDN (Play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    /* Estilos auxiliares: animaciones y detalles que Tailwind CDN no cubre directamente */
+    .pulse-dot { animation: pulseDot 1.4s ease-in-out infinite; }
+    @keyframes pulseDot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: .35; transform: scale(.75); }
+    }
+    .bar-fill { transition: width .35s cubic-bezier(.4,0,.2,1), background-color .35s; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+
+<body class="bg-slate-950 text-slate-200 min-h-screen antialiased">
+
+  <!-- ============================ CABECERA ============================ -->
+  <header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-10">
+    <div class="max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-900/40">D</div>
+        <div>
+          <h1 class="text-lg font-semibold leading-tight">Deriv Tick Analyzer</h1>
+          <p class="text-xs text-slate-400">Análisis estadístico de dígitos · Solo lectura (API pública WebSocket)</p>
+        </div>
+      </div>
+
+      <!-- Indicador de estado de conexión -->
+      <div id="statusBadge" class="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium border border-slate-700 bg-slate-800/80">
+        <span id="statusDot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+        <span id="statusText">Desconectado</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+
+    <!-- ============================ CONTROLES ============================ -->
+    <section class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+
+        <!-- Selector de índice de volatilidad -->
+        <div class="md:col-span-5">
+          <label for="symbolSelect" class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Índice sintético de volatilidad</label>
+          <select id="symbolSelect"
+                  class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+            <!-- Opciones generadas por JS desde la lista de activos soportados -->
+          </select>
+        </div>
+
+        <!-- Tamaño de muestra (cola FIFO) -->
+        <div class="md:col-span-3">
+          <label for="sampleInput" class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Muestra de ticks (FIFO)</label>
+          <input id="sampleInput" type="number" min="10" max="5000" step="10" value="300"
+                 class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent" />
+          <p class="text-[11px] text-slate-500 mt-1">Rango permitido: 10 – 5000 ticks</p>
+        </div>
+
+        <!-- Botones de control -->
+        <div class="md:col-span-4 flex gap-2">
+          <button id="btnStart"
+                  class="flex-1 bg-indigo-600 hover:bg-indigo-500 active:scale-[.98] disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl px-4 py-2.5 text-sm transition">
+            ▶ Iniciar
+          </button>
+          <button id="btnPause" disabled
+                  class="flex-1 bg-amber-600 hover:bg-amber-500 active:scale-[.98] disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl px-4 py-2.5 text-sm transition">
+            ⏸ Pausar
+          </button>
+          <button id="btnReset"
+                  class="flex-1 bg-slate-700 hover:bg-slate-600 active:scale-[.98] text-white font-semibold rounded-xl px-4 py-2.5 text-sm transition">
+            ↺ Reiniciar
+          </button>
+        </div>
+      </div>
+
+      <!-- Resumen de métricas rápidas -->
+      <div class="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+        <div class="bg-slate-800/60 rounded-xl py-3 px-2 border border-slate-800">
+          <p class="text-[11px] uppercase tracking-wider text-slate-500">Ticks en cola</p>
+          <p id="metricQueue" class="text-xl font-bold text-slate-100 tabular-nums">0 / 300</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-xl py-3 px-2 border border-slate-800">
+          <p class="text-[11px] uppercase tracking-wider text-slate-500">Total recibidos</p>
+          <p id="metricTotal" class="text-xl font-bold text-slate-100 tabular-nums">0</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-xl py-3 px-2 border border-slate-800">
+          <p class="text-[11px] uppercase tracking-wider text-slate-500">Último precio</p>
+          <p id="metricLastPrice" class="text-xl font-bold text-emerald-400 tabular-nums">—</p>
+        </div>
+        <div class="bg-slate-800/60 rounded-xl py-3 px-2 border border-slate-800">
+          <p class="text-[11px] uppercase tracking-wider text-slate-500">Dígito más frecuente</p>
+          <p id="metricHotDigit" class="text-xl font-bold text-violet-400 tabular-nums">—</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ PANEL DE ANÁLISIS ============================ -->
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+      <!-- Tabla de frecuencias con barras -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="font-semibold text-slate-100">Frecuencia de dígitos (muestra activa)</h2>
+          <span class="text-xs text-slate-500">absoluta · relativa %</span>
+        </div>
+        <div id="digitTable" class="space-y-2.5">
+          <!-- Filas generadas por JS (dígitos 0-9) -->
+        </div>
+      </div>
+
+      <!-- Gráfico de columnas + últimos ticks -->
+      <div class="space-y-6">
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
+          <h2 class="font-semibold text-slate-100 mb-4">Distribución visual</h2>
+          <!-- Gráfico de barras dibujado en canvas propio (sin librerías externas) -->
+          <canvas id="barChart" class="w-full h-48"></canvas>
+        </div>
+
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold text-slate-100">Secuencia reciente de dígitos</h2>
+            <span class="text-xs text-slate-500">últimos 40 (izq → der = más nuevo)</span>
+          </div>
+          <div id="recentDigits" class="flex flex-wrap gap-1.5 min-h-[2.25rem]">
+            <!-- Chips generados por JS -->
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Nota informativa -->
+    <footer class="text-xs text-slate-500 leading-relaxed border-t border-slate-800 pt-4 pb-8">
+      ⚠️ Herramienta estrictamente <strong>analítica y de visualización</strong>. No ejecuta operaciones de compra/venta
+      ni requiere autenticación: se conecta al flujo público de datos de Deriv mediante la API WebSocket
+      (<code class="text-slate-400">wss://ws.derivws.com/websockets/v3?app_id=1089</code>) usando el método
+      <code class="text-slate-400">ticks</code>. La suscripción anónima a índices sintéticos puede ser limitada por el
+      servidor si se abusa de ella; en tal caso la app reconecta automáticamente con respaldo exponencial.
+    </footer>
+  </main>
+
+  <script>
+  "use strict";
+
+  /* =====================================================================
+   *  DERIV TICK ANALYZER
+   *  --------------------------------------------------------------------
+   *  Arquitectura:
+   *   1. WSManager  -> conexión WebSocket, handshake, reconexión con backoff
+   *   2. TickStore  -> cola FIFO de capacidad configurable (Array.shift/push)
+   *   3. DigitStats -> motor de análisis estadístico (frec. absoluta/relativa)
+   *   4. UI         -> renderizado (tabla, barras, canvas, chips, estado)
+   *  Ningún componente envía órdenes de trading: solo `ticks_history` (snapshot)
+   *  y `ticks` (stream en vivo).
+   * ===================================================================== */
+
+  // ---------- Configuración ----------
+  const APP_ID   = "1089";                                   // app_id público de demostración de Deriv
+  const WS_URL   = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+  const RECONNECT_BASE_MS = 1000;                            // base del backoff exponencial
+  const RECONNECT_MAX_MS  = 30000;                           // tope del backoff
+  const HISTORY_COUNT     = 1000;                            // ticks históricos máx. para precargar la cola
+
+  // Activos sintéticos disponibles (índice : símbolo oficial de Deriv)
+  const SYMBOLS = [
+    { sym: "R_10",    name: "Volatility 10 Index" },
+    { sym: "1HZ10V",  name: "Volatility 10 (1s) Index" },
+    { sym: "R_25",    name: "Volatility 25 Index" },
+    { sym: "1HZ25V",  name: "Volatility 25 (1s) Index" },
+    { sym: "R_50",    name: "Volatility 50 Index" },
+    { sym: "1HZ50V",  name: "Volatility 50 (1s) Index" },
+    { sym: "R_75",    name: "Volatility 75 Index" },
+    { sym: "1HZ75V",  name: "Volatility 75 (1s) Index" },
+    { sym: "R_100",   name: "Volatility 100 Index" },
+    { sym: "1HZ100V", name: "Volatility 100 (1s) Index" },
+  ];
+
+  // ---------- Estado global ----------
+  let ws = null;                 // instancia WebSocket
+  let isConnected   = false;     // socket abierto + handshake OK
+  let isRunning     = false;     // recolección activa (no pausada)
+  let subscribedSym = null;      // símbolo actualmente suscrito
+  let reconnectAttempts = 0;
+  let reconnectTimer  = null;
+  let heartbeatTimer  = null;    // ping periódico para mantener viva la conexión
+  let totalReceived   = 0;       // contador histórico (no se reinicia con la cola)
+
+  /**
+   * Cola FIFO con capacidad fija. Al exceder `capacity`, elimina el elemento
+   * más antiguo (`shift`) — requisito: si son 300 y llega el 301, sale el 1º.
+   */
+  class TickQueue {
+    constructor(capacity = 300) { this.capacity = capacity; this.items = []; }
+    push(item) {
+      this.items.push(item);
+      while (this.items.length > this.capacity) this.items.shift(); // descarte FIFO
+    }
+    clear()      { this.items = []; }
+    get length() { return this.items.length; }
+    setCapacity(n) {                       // re-dimensionado en caliente
+      this.capacity = n;
+      while (this.items.length > this.capacity) this.items.shift();
+    }
+  }
+
+  const queue = new TickQueue(300);
+
+  // ---------- Utilidades ----------
+  /** Extrae el último dígito decimal del quote respetando los decimales del activo. */
+  function lastDigitOf(quoteStr) {
+    // El string llega ya formateado por Deriv (ej. "1234.56") → tomamos su último carácter numérico.
+    const s = String(quoteStr).replace(/[^0-9]/g, "");
+    return s.length ? Number(s[s.length - 1]) : null;
+  }
+
+  /** Motor estadístico: frecuencias absoluta y relativa sobre la muestra activa. */
+  function computeStats(items) {
+    const counts = new Array(10).fill(0);
+    for (const t of items) {
+      const d = lastDigitOf(t.quote);
+      if (d !== null) counts[d]++;
+    }
+    const total = items.length;
+    const rel = counts.map(c => (total ? (c / total) * 100 : 0));
+    return { counts, rel, total };
+  }
+
+  // =====================================================================
+  //  WEBSOCKET: conexión, suscripción, reconexión automática
+  // =====================================================================
+
+  function sendJSON(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  function connect() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+    setStatus("connecting");
+    ws = new WebSocket(WS_URL);
+
+    ws.addEventListener("open", () => {
+      isConnected = true;
+      reconnectAttempts = 0;
+      setStatus("connected");
+      startHeartbeat();
+      if (isRunning) subscribeTo(currentSymbol());
+    });
+
+    ws.addEventListener("message", handleMessage);
+
+    ws.addEventListener("close", () => {
+      isConnected = false;
+      stopHeartbeat();
+      if (isRunning) {                       // solo reconectar si el usuario quiere datos activos
+        setStatus("reconnecting");
+        scheduleReconnect();
+      } else {
+        setStatus("disconnected");
+      }
+    });
+
+    ws.addEventListener("error", () => {     // 'error' siempre va seguido de 'close'; nada extra aquí
+      // El manejo queda en 'close' para evitar reconexiones dobles.
+    });
+  }
+
+  /** Backoff exponencial con jitter: 1s, 2s, 4s… hasta 30s. */
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
+    const jitter = delay * 0.2 * Math.random();
+    reconnectAttempts++;
+    reconnectTimer = setTimeout(() => { if (isRunning) connect(); }, delay + jitter);
+  }
+
+  /** Ping cada 30s: evita cortes por inactividad según la documentación de Deriv. */
+  function startHeartbeat() {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => sendJSON({ ping: 1 }), 30000);
+  }
+  function stopHeartbeat() { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+
+  /**
+   * Suscripción completa:
+   *  a) `ticks_history` con `end:"latest"` y `count` → snapshot inicial para llenar la cola de inmediato.
+   *  b) `forget_all: "ticks"` primero para evitar duplicados al cambiar de símbolo.
+   *  c) `ticks` → stream en vivo.
+   */
+  function subscribeTo(symbol) {
+    subscribedSym = symbol;
+    sendJSON({ forget_all: "ticks" });                          // limpiar suscripciones previas
+    sendJSON({                                             // (a) snapshot histórico
+      ticks_history: symbol, end: "latest", count: HISTORY_COUNT, style: "ticks", subscribe: 1
+    });
+    sendJSON({ ticks: symbol, subscribe: 1 });                  // (c) flujo en vivo
+  }
+
+  function handleMessage(ev) {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    if (msg.error) {                                            // errores de API (límite de anon, etc.)
+      console.warn("[Deriv API error]", msg.error.code, msg.error.message);
+      setStatus("api_error", msg.error.message);
+      return;
+    }
+
+    // Snapshot histórico: con `subscribe:1` la respuesta llega como msg_type "ticks"
+    // con campo `history` ({ epoch: quote }) + suscripción activa al stream.
+    // Sin subscribe llegaría msg_type "history" con array `messages`.
+    if (msg.msg_type === "ticks" && msg.ticks && msg.ticks.history) {
+      ingestHistory(msg.ticks.history);
+      return;
+    }
+    if (msg.msg_type === "history" && Array.isArray(msg.messages)) {
+      const hist = {};
+      for (const h of msg.messages) if (h.tick) hist[h.tick.epoch] = h.tick.quote;
+      ingestHistory(hist);
+      return;
+    }
+
+    // Tick en vivo: { msg_type: "tick", tick: { symbol, epoch, quote, ... } }
+    if (msg.msg_type === "tick" && msg.tick && msg.tick.symbol === subscribedSym) {
+      ingestTick(msg.tick.quote);
+      scheduleRender();                                        // render coalescido a un frame
+    }
+  }
+
+  /** Inserta el snapshot histórico ordenado por época y deduplicado contra la cola viva. */
+  function ingestHistory(historyObj) {
+    const epochs = Object.keys(historyObj).map(Number).sort((a, b) => a - b);
+    const seen = new Set(queue.items.map(t => t.epoch));       // evitar duplicados tick-vs-histórico
+    for (const e of epochs) {
+      if (!seen.has(e)) queue.push({ epoch: e, quote: String(historyObj[e]) });
+    }
+    scheduleRender();
+  }
+
+  function ingestTick(quote) {
+    if (quote === undefined || quote === null) return;
+    queue.push({ epoch: Date.now(), quote: String(quote) });
+    totalReceived++;
+  }
+
+  // ---------- Renderizado coalescido (máx. 1 repaint por frame de animación) ----------
+  let renderPending = false;
+  function scheduleRender() {
+    if (renderPending) return;
+    renderPending = true;
+    requestAnimationFrame(() => { renderPending = false; render(); });
+  }
+
+  // =====================================================================
+  //  UI
+  // =====================================================================
+
+  const $ = id => document.getElementById(id);
+  const els = {
+    select: $("symbolSelect"), sample: $("sampleInput"),
+    btnStart: $("btnStart"), btnPause: $("btnPause"), btnReset: $("btnReset"),
+    statusDot: $("statusDot"), statusText: $("statusText"),
+    metricQueue: $("metricQueue"), metricTotal: $("metricTotal"),
+    metricLastPrice: $("metricLastPrice"), metricHotDigit: $("metricHotDigit"),
+    digitTable: $("digitTable"), recent: $("recentDigits"), chart: $("barChart"),
+  };
+
+  // Poblar dropdown
+  SYMBOLS.forEach(s => {
+    const o = document.createElement("option");
+    o.value = s.sym; o.textContent = s.name;
+    els.select.appendChild(o);
+  });
+
+  // Construir filas de la tabla una sola vez; luego solo se actualizan textos/ancho.
+  const rowRefs = [];
+  (function buildTable() {
+    for (let d = 0; d <= 9; d++) {
+      const row = document.createElement("div");
+      row.className = "flex items-center gap-3";
+      row.innerHTML = `
+        <span class="w-7 h-7 shrink-0 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-sm font-bold">${d}</span>
+        <div class="flex-1">
+          <div class="h-3 rounded-full bg-slate-800 overflow-hidden">
+            <div class="bar-fill h-full rounded-full bg-indigo-500" style="width:0%"></div>
+          </div>
+        </div>
+        <span class="w-28 text-right text-xs tabular-nums text-slate-400">0 veces · 0.00%</span>`;
+      els.digitTable.appendChild(row);
+      rowRefs.push({ bar: row.querySelector(".bar-fill"), label: row.querySelector("span:last-child") });
+    }
+  })();
+
+  function currentSymbol() { return els.select.value; }
+
+  function setStatus(state, detail) {
+    const map = {
+      connected:    ["bg-emerald-400 pulse-dot", "Conectado"],
+      connecting:   ["bg-sky-400 pulse-dot", "Conectando…"],
+      reconnecting: ["bg-amber-400 pulse-dot", "Reconectando…"],
+      disconnected: ["bg-slate-500", "Desconectado"],
+      paused:       ["bg-violet-400", "En pausa"],
+      api_error:    ["bg-rose-500 pulse-dot", "Error API"],
+    };
+    const [cls, txt] = map[state] || map.disconnected;
+    els.statusDot.className = "w-2.5 h-2.5 rounded-full " + cls;
+    els.statusText.textContent = detail ? `${txt}: ${detail}` : txt;
+  }
+
+  // Colores por calor de frecuencia (más frecuente = más cálido)
+  function heatColor(pct, maxPct) {
+    if (!maxPct) return "#6366f1";
+    const t = pct / maxPct;                                  // 0..1
+    // Interpolación simple índigo -> violeta -> rosa
+    const lerp = (a, b, k) => Math.round(a + (b - a) * k);
+    const c1 = [99, 102, 241], c2 = [217, 70, 239], c3 = [244, 63, 94];
+    const mix = t < .5 ? [c1, c2, t * 2] : [c2, c3, (t - .5) * 2];
+    const [a, b, k] = mix;
+    return `rgb(${lerp(a[0],b[0],k)},${lerp(a[1],b[1],k)},${lerp(a[2],b[2],k)})`;
+  }
+
+  function render() {
+    const stats = computeStats(queue.items);
+    const maxRel = Math.max(...stats.rel, 0.0001);
+
+    // Tabla + barras horizontales
+    for (let d = 0; d <= 9; d++) {
+      const { bar, label } = rowRefs[d];
+      const pct = stats.rel[d];
+      bar.style.width = pct + "%";
+      bar.style.backgroundColor = heatColor(pct, maxRel);
+      label.textContent = `${stats.counts[d]} veces · ${pct.toFixed(2)}%`;
+    }
+
+    // Métricas rápidas
+    els.metricQueue.textContent = `${queue.length} / ${queue.capacity}`;
+    els.metricTotal.textContent = totalReceived.toLocaleString("es");
+    const lastTick = queue.items[queue.items.length - 1];
+    els.metricLastPrice.textContent = lastTick ? lastTick.quote : "—";
+
+    // Dígito más frecuente (hot)
+    const hotIdx = stats.rel.indexOf(Math.max(...stats.rel));
+    els.metricHotDigit.textContent = stats.total ? `${hotIdx} (${stats.rel[hotIdx].toFixed(1)}%)` : "—";
+
+    // Chips de secuencia reciente (últimos 40)
+    const recent = queue.items.slice(-40);
+    els.recent.innerHTML = "";
+    for (const t of recent) {
+      const d = lastDigitOf(t.quote);
+      const chip = document.createElement("span");
+      const share = stats.total ? stats.rel[d] : 0;
+      chip.className = "w-7 h-7 rounded-md text-xs font-bold flex items-center justify-center border";
+      chip.style.color = heatColor(share, maxRel);
+      chip.style.borderColor = "rgba(100,116,139,.35)";
+      chip.style.background = "rgba(30,41,59,.8)";
+      chip.title = `Precio ${t.quote} → dígito ${d} (${share.toFixed(2)}%)`;
+      chip.textContent = d;
+      els.recent.appendChild(chip);
+    }
+
+    drawChart(stats);
+  }
+
+  // ---------- Gráfico de columnas en canvas (sin dependencias) ----------
+  function drawChart(stats) {
+    const cvs = els.chart;
+    const dpr = window.devicePixelRatio || 1;
+    const W = cvs.clientWidth, H = cvs.clientHeight;
+    if (cvs.width !== W * dpr) { cvs.width = W * dpr; cvs.height = H * dpr; }
+    const ctx = cvs.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, W, H);
+
+    const pad = { top: 14, bottom: 24, left: 8, right: 8 };
+    const n = 10;
+    const gap = 8;
+    const bw = (W - pad.left - pad.right - gap * (n - 1)) / n;
+    const maxH = H - pad.top - pad.bottom;
+    const maxRel = Math.max(...stats.rel, 1);                // escala relativa al máximo observado
+
+    for (let d = 0; d <= 9; d++) {
+      const x = pad.left + d * (bw + gap);
+      const h = Math.max(2, (stats.rel[d] / maxRel) * maxH);
+      const y = H - pad.bottom - h;
+
+      // Barra con degradado vertical
+      const grad = ctx.createLinearGradient(0, y, 0, H - pad.bottom);
+      const col = heatColor(stats.rel[d], maxRel);
+      grad.addColorStop(0, col);
+      grad.addColorStop(1, "rgba(30,41,59,.4)");
+      ctx.fillStyle = grad;
+      roundRect(ctx, x, y, bw, h, 4);
+      ctx.fill();
+
+      // Etiqueta porcentaje arriba
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "10px ui-sans-serif, system-ui";
+      ctx.textAlign = "center";
+      if (stats.total) ctx.fillText(stats.rel[d].toFixed(1) + "%", x + bw / 2, y - 4);
+
+      // Dígito debajo
+      ctx.fillStyle = "#cbd5e1";
+      ctx.font = "bold 12px ui-sans-serif, system-ui";
+      ctx.fillText(String(d), x + bw / 2, H - 8);
+    }
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, 0);
+    ctx.arcTo(x, y + h, x, y, 0);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // =====================================================================
+  //  CONTROLES (Iniciar / Pausar / Reiniciar)
+  // =====================================================================
+
+  els.btnStart.addEventListener("click", () => {
+    applySampleSize();
+    isRunning = true;
+    els.btnStart.disabled = true;
+    els.btnPause.disabled = false;
+    els.sample.disabled = true;
+    els.select.disabled = true;
+    connect();
+    if (isConnected) subscribeTo(currentSymbol());
+  });
+
+  els.btnPause.addEventListener("click", () => {
+    if (!isRunning) return;
+    isRunning = false;                                        // congela ingesta/reconexión
+    sendJSON({ forget_all: "ticks" });                        // libera el stream en el servidor
+    if (ws) { try { ws.close(); } catch {} }                  // cierre limpio; sin reconexión
+    setStatus("paused");
+    els.btnStart.disabled = false;
+    els.btnPause.disabled = true;
+    els.sample.disabled = false;
+    els.select.disabled = false;
+    els.btnStart.textContent = "▶ Reanudar";
+  });
+
+  els.btnReset.addEventListener("click", () => {
+    queue.clear();
+    totalReceived = 0;
+    applySampleSize();
+    render();
+    setStatus(isConnected ? "connected" : (isRunning ? "reconnecting" : "disconnected"));
+  });
+
+  // Cambiar símbolo mientras está corriendo → resuscribir sin recargar
+  els.select.addEventListener("change", () => {
+    if (isRunning && isConnected) { queue.clear(); totalReceived = 0; subscribeTo(currentSymbol()); render(); }
+  });
+
+  // Cambiar tamaño de muestra mientras está corriendo → re-dimensionar cola
+  els.sample.addEventListener("change", () => { if (applySampleSize()) render(); });
+
+  function applySampleSize() {
+    let v = parseInt(els.sample.value, 10);
+    if (isNaN(v)) v = 300;
+    v = Math.min(5000, Math.max(10, v));                     // clamp 10..5000
+    els.sample.value = v;
+    queue.setCapacity(v);
+    return true;
+  }
+
+  // Render inicial con la cola vacía
+  render();
+  </script>
+</body>
+</html>
